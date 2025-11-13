@@ -1,0 +1,28 @@
+# Environment files
+.env
+.env.local
+.env.production
+.env.development
+
+# Secret keys
+*.key
+*.pem
+
+# Django secret and config files
+settings_local.py
+secrets.json
+
+# Media uploads
+media/
+staticfiles/
+
+# Database files (if SQLite)
+*.sqlite3
+
+# Python cache
+__pycache__/
+
+# Virtual env
+venv/
+
+main_application/views.py
