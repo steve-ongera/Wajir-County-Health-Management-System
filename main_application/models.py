@@ -1,5 +1,3 @@
-
-
 from django.db import models
 from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
 from django.contrib.postgres.fields import ArrayField
@@ -7,6 +5,7 @@ from django.core.validators import MinValueValidator, RegexValidator
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 import uuid
+
 # ==================== AUDIT & NOTIFICATIONS ====================
 
 class AuditLog(models.Model):
