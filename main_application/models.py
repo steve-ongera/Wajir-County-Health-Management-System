@@ -1,1043 +1,1311 @@
-"""
-Wajir County Health Management System - Django Admin Configuration
-Complete admin interface with custom actions, filters, and displays
-"""
 
-from django.contrib import admin
-from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
-from django.utils.html import format_html
-from django.urls import reverse
-from django.db.models import Count, Q
+
+from django.db import models
+from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
+from django.contrib.postgres.fields import ArrayField
+from django.core.validators import MinValueValidator, RegexValidator
 from django.utils import timezone
-from datetime import timedelta
+from django.utils.translation import gettext_lazy as _
+import uuid
+# ==================== AUDIT & NOTIFICATIONS ====================
 
-# Import all models
-from .models import (
-    County, SubCounty, Ward, Role, User, Facility, CommunityUnit,
-    CommunityHealthVolunteer, Household, Person, PregnancyRecord, ANCVisit,
-    PNCVisit, ImmunizationRecord, HouseholdVisit, OutreachEvent, Screening,
-    Referral, ReferralFollowUp, SurveillanceReport, MortalityReport,
-    Program, Indicator, MonthlyReport, Campaign, Commodity, Supplier,
-    Stock, StockTransaction, ProcurementRequest, PurchaseOrder,
-    LabTestOrder, LabResult, StaffProfile, Training, TrainingAttendance,
-    AuditLog, Notification, FHIRMapping, DataExportJob, Appointment,
-    Permission, Location
-)
+class AuditLog(models.Model):
+    """Audit trail for sensitive operations"""
+    ACTION_CHOICES = [
+        ('CREATE', 'Create'),
+        ('UPDATE', 'Update'),
+        ('DELETE', 'Delete'),
+        ('VIEW', 'View'),
+        ('EXPORT', 'Export'),
+    ]
+    
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    
+    model_name = models.CharField(max_length=100, db_index=True)
+    object_id = models.CharField(max_length=100, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
+    class Meta:
+        verbose_name_plural = "Counties"
+        ordering = ['name']
 
-# ==================== CUSTOM ADMIN SITE ====================
+    def __str__(self):
+        return f"{self.name} ({self.code})"
+    
+# ==================== CORE ADMINISTRATIVE MODELS ====================
 
-class WajirHealthAdminSite(admin.AdminSite):
-    site_header = "Wajir County Health Management System"
-    site_title = "Wajir Health Admin"
-    index_title = "System Administration"
+class County(models.Model):
+    """County administrative unit"""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=100, unique=True)
+    code = models.CharField(max_length=10, unique=True)
+    population = models.IntegerField(null=True, blank=True)
+    contact_person = models.CharField(max_length=200, blank=True)
+    phone = models.CharField(max_length=20, blank=True)
+    email = models.EmailField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
 
-# Create custom admin site instance
-# admin_site = WajirHealthAdminSite(name='wajir_health_admin')
-# Use default admin site for this example
-
-
-# ==================== INLINE ADMINS ====================
-
-class SubCountyInline(admin.TabularInline):
-    model = SubCounty
-    extra = 0
-    fields = ['name', 'code', 'population']
-
-
-class WardInline(admin.TabularInline):
-    model = Ward
-    extra = 0
-    fields = ['name', 'code', 'population']
-
-
-class ANCVisitInline(admin.TabularInline):
-    model = ANCVisit
-    extra = 0
-    fields = ['visit_number', 'visit_date', 'gestation_weeks', 'weight', 'blood_pressure']
-    readonly_fields = ['visit_number', 'visit_date']
+    def __str__(self):
+        return f"Follow-up on {self.referral.referral_number}"
+    
 
 
-class PNCVisitInline(admin.TabularInline):
-    model = PNCVisit
-    extra = 0
-    fields = ['visit_number', 'visit_date', 'days_postpartum', 'mother_condition']
-    readonly_fields = ['visit_number', 'visit_date']
+
+class SubCounty(models.Model):
+    """Sub-county administrative unit"""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    county = models.ForeignKey(County, on_delete=models.CASCADE, related_name='subcounties')
+    name = models.CharField(max_length=100)
+    code = models.CharField(max_length=20, unique=True)
+    population = models.IntegerField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name_plural = "Sub-counties"
+        unique_together = [['county', 'name']]
+        ordering = ['county', 'name']
+        indexes = [
+            models.Index(fields=['county', 'code']),
+        ]
+
+    def __str__(self):
+        return f"{self.name} - {self.county.name}"
 
 
-class ReferralFollowUpInline(admin.TabularInline):
-    model = ReferralFollowUp
-    extra = 0
-    fields = ['follow_up_date', 'followed_up_by', 'status_update']
-    readonly_fields = ['follow_up_date']
+class Ward(models.Model):
+    """Ward administrative unit"""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    subcounty = models.ForeignKey(SubCounty, on_delete=models.CASCADE, related_name='wards')
+    name = models.CharField(max_length=100)
+    code = models.CharField(max_length=20, unique=True)
+    population = models.IntegerField(null=True, blank=True)
+    # Optional PostGIS fields
+    # coordinates = models.PointField(null=True, blank=True, srid=4326)
+    # boundary = models.PolygonField(null=True, blank=True, srid=4326)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = [['subcounty', 'name']]
+        ordering = ['subcounty', 'name']
+        indexes = [
+            models.Index(fields=['subcounty', 'code']),
+        ]
+
+    def __str__(self):
+        return f"{self.name} - {self.subcounty.name}"
 
 
-class StockInline(admin.TabularInline):
-    model = Stock
-    extra = 0
-    fields = ['commodity', 'quantity', 'batch_number', 'expiry_date']
-    readonly_fields = ['last_updated']
+# ==================== USERS & ACCESS CONTROL ====================
+
+class Role(models.Model):
+    """User roles in the health system"""
+    ROLE_CHOICES = [
+        ('COUNTY_ADMIN', 'County Administrator'),
+        ('PUBLIC_HEALTH_OFFICER', 'Public Health Officer'),
+        ('ME_OFFICER', 'M&E Officer'),
+        ('FACILITY_MANAGER', 'Facility Manager'),
+        ('CLINICAL_OFFICER', 'Clinical Officer'),
+        ('NURSE', 'Nurse'),
+        ('LAB_TECH', 'Laboratory Technician'),
+        ('PHARMACIST', 'Pharmacist'),
+        ('DATA_CLERK', 'Data Clerk'),
+        ('CHV', 'Community Health Volunteer'),
+        ('CHEW', 'Community Health Extension Worker'),
+    ]
+    
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=50, choices=ROLE_CHOICES, unique=True)
+    description = models.TextField(blank=True)
+    level = models.IntegerField(default=1, help_text="Higher level = more access")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return self.get_name_display()
 
 
-class LabResultInline(admin.TabularInline):
-    model = LabResult
-    extra = 0
-    fields = ['test_name', 'result_value', 'result_status', 'test_date']
+class CustomUserManager(BaseUserManager):
+    """Custom user manager for email/phone authentication"""
+    
+    def create_user(self, email, password=None, **extra_fields):
+        if not email:
+            raise ValueError('Email is required')
+        email = self.normalize_email(email)
+        user = self.model(email=email, **extra_fields)
+        user.set_password(password)
+        user.save(using=self._db)
+        return user
+
+    def create_superuser(self, email, password=None, **extra_fields):
+        extra_fields.setdefault('is_staff', True)
+        extra_fields.setdefault('is_superuser', True)
+        extra_fields.setdefault('is_active', True)
+        return self.create_user(email, password, **extra_fields)
 
 
-# ==================== CORE ADMINISTRATIVE ====================
-
-@admin.register(County)
-class CountyAdmin(admin.ModelAdmin):
-    list_display = ['name', 'code', 'population', 'contact_person', 'phone', 'created_at']
-    search_fields = ['name', 'code', 'contact_person']
-    list_filter = ['created_at']
-    inlines = [SubCountyInline]
-    fieldsets = (
-        ('Basic Information', {
-            'fields': ('name', 'code', 'population')
-        }),
-        ('Contact Details', {
-            'fields': ('contact_person', 'phone', 'email')
-        }),
-        ('Timestamps', {
-            'fields': ('created_at', 'updated_at'),
-            'classes': ('collapse',)
-        }),
+class User(AbstractBaseUser, PermissionsMixin):
+    """Custom user model with Kenyan-specific fields"""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    email = models.EmailField(unique=True)
+    phone = models.CharField(
+        max_length=15, 
+        unique=True,
+        validators=[RegexValidator(regex=r'^\+?254\d{9}$', message='Valid Kenyan phone format')]
     )
-    readonly_fields = ['created_at', 'updated_at']
-
-
-@admin.register(SubCounty)
-class SubCountyAdmin(admin.ModelAdmin):
-    list_display = ['name', 'county', 'code', 'population', 'ward_count']
-    list_filter = ['county']
-    search_fields = ['name', 'code']
-    inlines = [WardInline]
+    first_name = models.CharField(max_length=100)
+    last_name = models.CharField(max_length=100)
+    national_id = models.CharField(max_length=20, unique=True, null=True, blank=True, db_index=True)
     
-    def ward_count(self, obj):
-        return obj.wards.count()
-    ward_count.short_description = 'Wards'
-
-
-@admin.register(Ward)
-class WardAdmin(admin.ModelAdmin):
-    list_display = ['name', 'subcounty', 'code', 'population', 'facility_count', 'household_count']
-    list_filter = ['subcounty__county', 'subcounty']
-    search_fields = ['name', 'code']
+    roles = models.ManyToManyField(Role, related_name='users', blank=True)
+    county = models.ForeignKey(County, on_delete=models.SET_NULL, null=True, blank=True)
+    subcounty = models.ForeignKey(SubCounty, on_delete=models.SET_NULL, null=True, blank=True)
     
-    def facility_count(self, obj):
-        return obj.facilities.count()
-    facility_count.short_description = 'Facilities'
+    is_active = models.BooleanField(default=True)
+    is_staff = models.BooleanField(default=False)
+    date_joined = models.DateTimeField(auto_now_add=True)
+    last_login = models.DateTimeField(null=True, blank=True)
     
-    def household_count(self, obj):
-        return obj.households.count()
-    household_count.short_description = 'Households'
+    objects = CustomUserManager()
+    
+    USERNAME_FIELD = 'email'
+    REQUIRED_FIELDS = ['phone', 'first_name', 'last_name']
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['email', 'national_id']),
+        ]
+
+    def __str__(self):
+        return f"{self.first_name} {self.last_name} ({self.email})"
+
+    def get_full_name(self):
+        return f"{self.first_name} {self.last_name}"
 
 
-# ==================== USERS & ACCESS ====================
-
-@admin.register(Role)
-class RoleAdmin(admin.ModelAdmin):
-    list_display = ['get_name_display', 'level', 'user_count', 'created_at']
-    list_filter = ['level']
-    search_fields = ['name', 'description']
-    filter_horizontal = ['permissions']
-    
-    def user_count(self, obj):
-        return obj.users.count()
-    user_count.short_description = 'Users'
-
-
-@admin.register(User)
-class UserAdmin(BaseUserAdmin):
-    list_display = ['email', 'full_name', 'phone', 'national_id', 'role_list', 'county', 'is_active', 'date_joined']
-    list_filter = ['is_active', 'is_staff', 'roles', 'county', 'date_joined']
-    search_fields = ['email', 'phone', 'first_name', 'last_name', 'national_id']
-    ordering = ['-date_joined']
-    filter_horizontal = ['roles', 'groups', 'user_permissions']
-    
-    fieldsets = (
-        ('Authentication', {
-            'fields': ('email', 'password')
-        }),
-        ('Personal Information', {
-            'fields': ('first_name', 'last_name', 'phone', 'national_id')
-        }),
-        ('Location & Roles', {
-            'fields': ('county', 'subcounty', 'roles')
-        }),
-        ('Permissions', {
-            'fields': ('is_active', 'is_staff', 'is_superuser', 'groups', 'user_permissions'),
-            'classes': ('collapse',)
-        }),
-        ('Important Dates', {
-            'fields': ('last_login', 'date_joined'),
-            'classes': ('collapse',)
-        }),
-    )
-    
-    add_fieldsets = (
-        ('Create User', {
-            'classes': ('wide',),
-            'fields': ('email', 'phone', 'first_name', 'last_name', 'password1', 'password2', 'roles'),
-        }),
-    )
-    
-    readonly_fields = ['date_joined', 'last_login']
-    
-    def full_name(self, obj):
-        return obj.get_full_name()
-    full_name.short_description = 'Full Name'
-    
-    def role_list(self, obj):
-        return ", ".join([role.get_name_display() for role in obj.roles.all()[:3]])
-    role_list.short_description = 'Roles'
-
-
-@admin.register(Permission)
-class PermissionAdmin(admin.ModelAdmin):
-    list_display = ['code', 'name', 'resource', 'action', 'is_active']
-    list_filter = ['resource', 'action', 'is_active']
-    search_fields = ['name', 'code', 'resource']
-    filter_horizontal = ['roles']
 
 
 # ==================== FACILITIES & COMMUNITY ====================
 
-@admin.register(Facility)
-class FacilityAdmin(admin.ModelAdmin):
-    list_display = ['name', 'facility_code', 'facility_type', 'ward', 'subcounty', 'is_operational', 'bed_capacity']
-    list_filter = ['facility_type', 'is_operational', 'subcounty__county', 'subcounty', 'ward']
-    search_fields = ['name', 'facility_code', 'phone']
-    inlines = [StockInline]
+class Facility(models.Model):
+    """Health facility"""
+    FACILITY_TYPES = [
+        ('DISPENSARY', 'Dispensary'),
+        ('HEALTH_CENTRE', 'Health Centre'),
+        ('SUB_COUNTY_HOSPITAL', 'Sub-County Hospital'),
+        ('COUNTY_REFERRAL', 'County Referral Hospital'),
+        ('PRIVATE_CLINIC', 'Private Clinic'),
+    ]
     
-    fieldsets = (
-        ('Basic Information', {
-            'fields': ('name', 'facility_code', 'facility_type')
-        }),
-        ('Location', {
-            'fields': ('ward', 'subcounty', 'physical_address', 'latitude', 'longitude')
-        }),
-        ('Contact', {
-            'fields': ('phone', 'email')
-        }),
-        ('Operational Details', {
-            'fields': ('is_operational', 'bed_capacity')
-        }),
-        ('Timestamps', {
-            'fields': ('created_at', 'updated_at'),
-            'classes': ('collapse',)
-        }),
-    )
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=200)
+    facility_code = models.CharField(max_length=20, unique=True, db_index=True)
+    facility_type = models.CharField(max_length=30, choices=FACILITY_TYPES)
     
-    readonly_fields = ['created_at', 'updated_at']
+    ward = models.ForeignKey(Ward, on_delete=models.CASCADE, related_name='facilities')
+    subcounty = models.ForeignKey(SubCounty, on_delete=models.CASCADE, related_name='facilities')
     
-    actions = ['mark_operational', 'mark_non_operational']
+    # Location
+    latitude = models.DecimalField(max_digits=10, decimal_places=7, null=True, blank=True)
+    longitude = models.DecimalField(max_digits=10, decimal_places=7, null=True, blank=True)
+    # coordinates = models.PointField(null=True, blank=True, srid=4326)  # PostGIS
     
-    def mark_operational(self, request, queryset):
-        updated = queryset.update(is_operational=True)
-        self.message_user(request, f'{updated} facilities marked as operational.')
-    mark_operational.short_description = 'Mark selected facilities as operational'
+    # Contact
+    phone = models.CharField(max_length=20, blank=True)
+    email = models.EmailField(blank=True)
+    physical_address = models.TextField(blank=True)
     
-    def mark_non_operational(self, request, queryset):
-        updated = queryset.update(is_operational=False)
-        self.message_user(request, f'{updated} facilities marked as non-operational.')
-    mark_non_operational.short_description = 'Mark selected facilities as non-operational'
+    # Operational
+    is_operational = models.BooleanField(default=True)
+    bed_capacity = models.IntegerField(null=True, blank=True)
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name_plural = "Facilities"
+        ordering = ['name']
+        indexes = [
+            models.Index(fields=['facility_code', 'ward']),
+        ]
+
+    def __str__(self):
+        return f"{self.name} ({self.facility_code})"
 
 
-@admin.register(CommunityUnit)
-class CommunityUnitAdmin(admin.ModelAdmin):
-    list_display = ['name', 'code', 'ward', 'linked_facility', 'target_population', 'chv_count', 'is_active']
-    list_filter = ['is_active', 'ward__subcounty__county', 'ward']
-    search_fields = ['name', 'code']
+class CommunityUnit(models.Model):
+    """Community Health Unit (CHU)"""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=200)
+    code = models.CharField(max_length=20, unique=True)
+    ward = models.ForeignKey(Ward, on_delete=models.CASCADE, related_name='community_units')
+    linked_facility = models.ForeignKey(Facility, on_delete=models.SET_NULL, null=True, related_name='community_units')
     
-    def chv_count(self, obj):
-        return obj.volunteers.count()
-    chv_count.short_description = 'CHVs'
+    target_population = models.IntegerField(help_text="Expected catchment population")
+    target_households = models.IntegerField(null=True, blank=True)
+    
+    is_active = models.BooleanField(default=True)
+    established_date = models.DateField(null=True, blank=True)
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"{self.name} - {self.ward.name}"
 
 
-@admin.register(CommunityHealthVolunteer)
-class CommunityHealthVolunteerAdmin(admin.ModelAdmin):
-    list_display = ['user', 'chv_number', 'community_unit', 'national_id', 'is_active', 'households_assigned', 'certification_status']
-    list_filter = ['is_active', 'gender', 'community_unit__ward__subcounty__county']
-    search_fields = ['user__first_name', 'user__last_name', 'national_id', 'chv_number']
-    date_hierarchy = 'training_date'
+class CommunityHealthVolunteer(models.Model):
+    """Community Health Volunteer (CHV)"""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='chv_profile')
+    community_unit = models.ForeignKey(CommunityUnit, on_delete=models.CASCADE, related_name='volunteers')
     
-    fieldsets = (
-        ('User & Community Unit', {
-            'fields': ('user', 'community_unit', 'chv_number')
-        }),
-        ('Personal Information', {
-            'fields': ('national_id', 'date_of_birth', 'gender')
-        }),
-        ('Training & Certification', {
-            'fields': ('training_date', 'certification_date', 'certification_expiry')
-        }),
-        ('Status', {
-            'fields': ('is_active', 'households_assigned')
-        }),
-    )
+    national_id = models.CharField(max_length=20, unique=True, db_index=True)
+    chv_number = models.CharField(max_length=20, unique=True, blank=True)
     
-    readonly_fields = ['chv_number']
+    date_of_birth = models.DateField()
+    gender = models.CharField(max_length=10, choices=[('M', 'Male'), ('F', 'Female'), ('O', 'Other')])
     
-    def certification_status(self, obj):
-        if not obj.certification_date:
-            return format_html('<span style="color: orange;">Not Certified</span>')
-        if obj.certification_expiry and obj.certification_expiry < timezone.now().date():
-            return format_html('<span style="color: red;">Expired</span>')
-        return format_html('<span style="color: green;">Valid</span>')
-    certification_status.short_description = 'Certification'
+    training_date = models.DateField(null=True, blank=True)
+    certification_date = models.DateField(null=True, blank=True)
+    certification_expiry = models.DateField(null=True, blank=True)
+    
+    is_active = models.BooleanField(default=True)
+    households_assigned = models.IntegerField(default=0)
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
+    class Meta:
+        verbose_name = "Community Health Volunteer"
+        indexes = [
+            models.Index(fields=['national_id', 'community_unit']),
+        ]
+
+    def __str__(self):
+        return f"{self.user.get_full_name()} - {self.community_unit.name}"
+    
 
 # ==================== POPULATION & HOUSEHOLDS ====================
 
-@admin.register(Household)
-class HouseholdAdmin(admin.ModelAdmin):
-    list_display = ['household_number', 'community_unit', 'ward', 'assigned_chv', 'number_of_members', 'is_active']
-    list_filter = ['is_active', 'ward__subcounty__county', 'ward', 'has_toilet']
-    search_fields = ['household_number', 'village']
-    date_hierarchy = 'registration_date'
+class Household(models.Model):
+    """Household record"""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    household_number = models.CharField(max_length=50, unique=True, db_index=True)
     
-    def get_queryset(self, request):
-        qs = super().get_queryset(request)
-        return qs.select_related('community_unit', 'ward', 'assigned_chv')
-
-
-@admin.register(Person)
-class PersonAdmin(admin.ModelAdmin):
-    list_display = ['full_name', 'national_id', 'nhif_number', 'gender', 'age', 'household', 'is_household_head', 'is_alive']
-    list_filter = ['gender', 'is_alive', 'is_household_head', 'household__ward__subcounty__county']
-    search_fields = ['first_name', 'last_name', 'national_id', 'nhif_number', 'phone']
-    date_hierarchy = 'date_of_birth'
+    community_unit = models.ForeignKey(CommunityUnit, on_delete=models.CASCADE, related_name='households')
+    ward = models.ForeignKey(Ward, on_delete=models.CASCADE, related_name='households')
+    assigned_chv = models.ForeignKey(CommunityHealthVolunteer, on_delete=models.SET_NULL, null=True, related_name='assigned_households')
     
-    fieldsets = (
-        ('Personal Information', {
-            'fields': ('first_name', 'middle_name', 'last_name', 'date_of_birth', 'gender')
-        }),
-        ('Identifiers', {
-            'fields': ('national_id', 'nhif_number', 'birth_certificate_number')
-        }),
-        ('Contact', {
-            'fields': ('phone', 'alternate_phone')
-        }),
-        ('Household', {
-            'fields': ('household', 'is_household_head')
-        }),
-        ('Health Information', {
-            'fields': ('blood_group', 'chronic_conditions', 'allergies'),
-            'classes': ('collapse',)
-        }),
-        ('Status', {
-            'fields': ('is_alive', 'date_of_death'),
-            'classes': ('collapse',)
-        }),
-    )
+    village = models.CharField(max_length=100, blank=True)
+    physical_address = models.TextField(blank=True)
+    latitude = models.DecimalField(max_digits=10, decimal_places=7, null=True, blank=True)
+    longitude = models.DecimalField(max_digits=10, decimal_places=7, null=True, blank=True)
     
-    readonly_fields = ['created_at', 'updated_at']
+    number_of_members = models.IntegerField(default=1, validators=[MinValueValidator(1)])
+    has_toilet = models.BooleanField(null=True, blank=True)
+    water_source = models.CharField(max_length=50, blank=True)
     
-    def full_name(self, obj):
-        return f"{obj.first_name} {obj.last_name}"
-    full_name.short_description = 'Name'
+    registration_date = models.DateField(default=timezone.now)
+    is_active = models.BooleanField(default=True)
     
-    def age(self, obj):
-        return obj.get_age()
-    age.short_description = 'Age'
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['household_number', 'ward']),
+        ]
+
+    def __str__(self):
+        return f"HH-{self.household_number}"
 
 
-# ==================== MATERNAL & CHILD HEALTH ====================
 
-@admin.register(PregnancyRecord)
-class PregnancyRecordAdmin(admin.ModelAdmin):
-    list_display = ['woman', 'edd', 'gravida', 'parity', 'is_high_risk', 'anc_visits_completed', 'delivery_date', 'is_active']
-    list_filter = ['is_high_risk', 'is_active', 'delivery_facility']
-    search_fields = ['woman__first_name', 'woman__last_name', 'woman__national_id']
-    date_hierarchy = 'edd'
-    inlines = [ANCVisitInline, PNCVisitInline]
+class Person(models.Model):
+    """Individual person/patient record"""
+    GENDER_CHOICES = [
+        ('M', 'Male'),
+        ('F', 'Female'),
+        ('O', 'Other'),
+    ]
     
-    fieldsets = (
-        ('Mother', {
-            'fields': ('woman',)
-        }),
-        ('Pregnancy Details', {
-            'fields': ('lmp_date', 'edd', 'gravida', 'parity')
-        }),
-        ('Risk Assessment', {
-            'fields': ('is_high_risk', 'risk_factors')
-        }),
-        ('ANC Progress', {
-            'fields': ('anc_visits_completed',)
-        }),
-        ('Delivery', {
-            'fields': ('delivery_date', 'delivery_outcome', 'delivery_facility'),
-            'classes': ('collapse',)
-        }),
-        ('Status', {
-            'fields': ('is_active', 'notes')
-        }),
-    )
-
-
-@admin.register(ANCVisit)
-class ANCVisitAdmin(admin.ModelAdmin):
-    list_display = ['pregnancy_woman', 'visit_number', 'visit_date', 'gestation_weeks', 'facility', 'attended_by']
-    list_filter = ['facility', 'visit_date']
-    search_fields = ['pregnancy__woman__first_name', 'pregnancy__woman__last_name']
-    date_hierarchy = 'visit_date'
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     
-    def pregnancy_woman(self, obj):
-        return obj.pregnancy.woman
-    pregnancy_woman.short_description = 'Woman'
-
-
-@admin.register(ImmunizationRecord)
-class ImmunizationRecordAdmin(admin.ModelAdmin):
-    list_display = ['child', 'vaccine_name', 'dose_number', 'administration_date', 'facility', 'administered_by']
-    list_filter = ['vaccine_name', 'administration_date', 'facility']
-    search_fields = ['child__first_name', 'child__last_name', 'vaccine_name', 'batch_number']
-    date_hierarchy = 'administration_date'
-
-
-# ==================== PUBLIC HEALTH ACTIVITIES ====================
-
-@admin.register(HouseholdVisit)
-class HouseholdVisitAdmin(admin.ModelAdmin):
-    list_display = ['household', 'chv', 'visit_date', 'visit_type', 'members_present', 'referrals_made']
-    list_filter = ['visit_type', 'visit_date', 'chv__community_unit']
-    search_fields = ['household__household_number']
-    date_hierarchy = 'visit_date'
-
-
-@admin.register(OutreachEvent)
-class OutreachEventAdmin(admin.ModelAdmin):
-    list_display = ['name', 'event_type', 'start_date', 'end_date', 'ward', 'people_reached', 'target_population', 'coverage']
-    list_filter = ['event_type', 'start_date', 'ward__subcounty__county']
-    search_fields = ['name', 'location']
-    date_hierarchy = 'start_date'
+    # Demographics
+    first_name = models.CharField(max_length=100)
+    middle_name = models.CharField(max_length=100, blank=True)
+    last_name = models.CharField(max_length=100)
+    date_of_birth = models.DateField()
+    gender = models.CharField(max_length=1, choices=GENDER_CHOICES)
     
-    def coverage(self, obj):
-        if obj.target_population > 0:
-            percentage = (obj.people_reached / obj.target_population) * 100
-            color = 'green' if percentage >= 80 else 'orange' if percentage >= 50 else 'red'
-            return format_html(f'<span style="color: {color};">{percentage:.1f}%</span>')
-        return '-'
-    coverage.short_description = 'Coverage %'
+    # Identifiers
+    national_id = models.CharField(max_length=20, unique=True, null=True, blank=True, db_index=True)
+    nhif_number = models.CharField(max_length=20, blank=True, db_index=True)
+    birth_certificate_number = models.CharField(max_length=50, blank=True)
+    
+    # Contact
+    phone = models.CharField(max_length=15, blank=True)
+    alternate_phone = models.CharField(max_length=15, blank=True)
+    
+    # Location
+    household = models.ForeignKey(Household, on_delete=models.CASCADE, related_name='members')
+    is_household_head = models.BooleanField(default=False)
+    
+    # Health
+    blood_group = models.CharField(max_length=5, blank=True)
+    chronic_conditions = ArrayField(models.CharField(max_length=100), blank=True, default=list)
+    allergies = models.TextField(blank=True)
+    
+    # Status
+    is_alive = models.BooleanField(default=True)
+    date_of_death = models.DateField(null=True, blank=True)
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name_plural = "People"
+        indexes = [
+            models.Index(fields=['national_id', 'nhif_number']),
+            models.Index(fields=['household', 'is_household_head']),
+        ]
+
+    def __str__(self):
+        return f"{self.first_name} {self.last_name}"
+
+    def get_age(self):
+        from datetime import date
+        today = date.today()
+        return today.year - self.date_of_birth.year - (
+            (today.month, today.day) < (self.date_of_birth.month, self.date_of_birth.day)
+        )
 
 
-@admin.register(Screening)
-class ScreeningAdmin(admin.ModelAdmin):
-    list_display = ['person', 'screening_type', 'screening_date', 'result', 'screened_by', 'follow_up_required']
-    list_filter = ['screening_type', 'result', 'follow_up_required', 'screening_date']
-    search_fields = ['person__first_name', 'person__last_name', 'person__national_id']
-    date_hierarchy = 'screening_date'
 
-
-# ==================== REFERRALS ====================
-
-@admin.register(Referral)
-class ReferralAdmin(admin.ModelAdmin):
-    list_display = ['referral_number', 'person', 'from_facility', 'to_facility', 'urgency', 'status', 'referral_date']
-    list_filter = ['status', 'urgency', 'from_facility', 'to_facility', 'referral_date']
-    search_fields = ['referral_number', 'person__first_name', 'person__last_name', 'person__national_id']
-    date_hierarchy = 'referral_date'
-    inlines = [ReferralFollowUpInline]
-    
-    readonly_fields = ['referral_number', 'created_at', 'updated_at']
-    
-    fieldsets = (
-        ('Referral Details', {
-            'fields': ('referral_number', 'person', 'referral_date', 'urgency')
-        }),
-        ('From/To', {
-            'fields': ('from_facility', 'to_facility', 'referred_by')
-        }),
-        ('Medical Information', {
-            'fields': ('reason', 'diagnosis', 'treatment_given')
-        }),
-        ('Status Tracking', {
-            'fields': ('status', 'accepted_by', 'accepted_date', 'arrival_date', 'completion_date')
-        }),
-        ('Outcome', {
-            'fields': ('outcome', 'feedback_to_referring_facility'),
-            'classes': ('collapse',)
-        }),
-    )
-    
-    actions = ['mark_completed', 'mark_cancelled']
-    
-    def mark_completed(self, request, queryset):
-        updated = queryset.update(status='COMPLETED', completion_date=timezone.now())
-        self.message_user(request, f'{updated} referrals marked as completed.')
-    mark_completed.short_description = 'Mark selected referrals as completed'
-    
-    def mark_cancelled(self, request, queryset):
-        updated = queryset.update(status='CANCELLED')
-        self.message_user(request, f'{updated} referrals cancelled.')
-    mark_cancelled.short_description = 'Cancel selected referrals'
 
 
 # ==================== SURVEILLANCE & REPORTS ====================
 
-@admin.register(SurveillanceReport)
-class SurveillanceReportAdmin(admin.ModelAdmin):
-    list_display = ['report_number', 'disease_name', 'report_date', 'ward', 'cases_confirmed', 'deaths', 'outbreak_declared']
-    list_filter = ['disease_name', 'outbreak_declared', 'report_date', 'ward__subcounty__county']
-    search_fields = ['report_number', 'disease_name', 'disease_code']
-    date_hierarchy = 'report_date'
+class SurveillanceReport(models.Model):
+    """Disease surveillance report"""
+    SOURCE_CHOICES = [
+        ('FACILITY', 'Health Facility'),
+        ('CHV', 'Community Health Volunteer'),
+        ('LABORATORY', 'Laboratory'),
+        ('SCHOOL', 'School'),
+    ]
     
-    readonly_fields = ['report_number', 'created_at']
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    report_number = models.CharField(max_length=50, unique=True)
+    
+    disease_name = models.CharField(max_length=100)
+    disease_code = models.CharField(max_length=20, blank=True, help_text="ICD code")
+    
+    report_date = models.DateField()
+    reporting_period_start = models.DateField()
+    reporting_period_end = models.DateField()
+    
+    ward = models.ForeignKey(Ward, on_delete=models.CASCADE, related_name='surveillance_reports')
+    facility = models.ForeignKey(Facility, on_delete=models.SET_NULL, null=True, blank=True)
+    
+    source = models.CharField(max_length=20, choices=SOURCE_CHOICES)
+    reported_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
+    
+    # Case counts
+    cases_suspected = models.IntegerField(default=0)
+    cases_confirmed = models.IntegerField(default=0)
+    deaths = models.IntegerField(default=0)
+    
+    # Demographics breakdown
+    cases_under_5 = models.IntegerField(default=0)
+    cases_5_to_15 = models.IntegerField(default=0)
+    cases_over_15 = models.IntegerField(default=0)
+    
+    males = models.IntegerField(default=0)
+    females = models.IntegerField(default=0)
+    
+    # Response
+    outbreak_declared = models.BooleanField(default=False)
+    response_initiated = models.BooleanField(default=False)
+    response_details = models.TextField(blank=True)
+    
+    attachments = models.JSONField(default=list, blank=True, help_text="S3 URLs to attachments")
+    
+    notes = models.TextField(blank=True)
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-report_date']
+        indexes = [
+            models.Index(fields=['disease_name', 'report_date']),
+        ]
+
+    def __str__(self):
+        return f"{self.disease_name} - {self.report_date}"
 
 
-@admin.register(MortalityReport)
-class MortalityReportAdmin(admin.ModelAdmin):
-    list_display = ['deceased_person', 'death_category', 'date_of_death', 'place_of_death', 'immediate_cause', 'autopsy_done']
-    list_filter = ['death_category', 'pregnancy_related', 'autopsy_done', 'date_of_death']
-    search_fields = ['deceased_person__first_name', 'deceased_person__last_name', 'immediate_cause']
-    date_hierarchy = 'date_of_death'
+class MortalityReport(models.Model):
+    """Mortality tracking report"""
+    DEATH_CATEGORIES = [
+        ('NEONATAL', 'Neonatal (0-28 days)'),
+        ('INFANT', 'Infant (29 days - 1 year)'),
+        ('CHILD', 'Child (1-5 years)'),
+        ('MATERNAL', 'Maternal'),
+        ('ADULT', 'Adult (15+ years)'),
+    ]
+    
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    
+    deceased_person = models.ForeignKey(Person, on_delete=models.SET_NULL, null=True, related_name='mortality_report')
+    
+    death_category = models.CharField(max_length=20, choices=DEATH_CATEGORIES)
+    date_of_death = models.DateField()
+    place_of_death = models.CharField(max_length=100, help_text="Home/Facility/Transit")
+    
+    facility = models.ForeignKey(Facility, on_delete=models.SET_NULL, null=True, blank=True)
+    ward = models.ForeignKey(Ward, on_delete=models.CASCADE, related_name='mortality_reports')
+    
+    # Cause
+    immediate_cause = models.CharField(max_length=200)
+    underlying_cause = models.CharField(max_length=200, blank=True)
+    contributing_factors = models.TextField(blank=True)
+    
+    # For maternal deaths
+    pregnancy_related = models.BooleanField(default=False)
+    timing = models.CharField(max_length=50, blank=True, help_text="During pregnancy/labor/postpartum")
+    
+    # Reporting
+    reported_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
+    report_date = models.DateField(default=timezone.now)
+    
+    autopsy_done = models.BooleanField(default=False)
+    autopsy_findings = models.TextField(blank=True)
+    
+    death_certificate_issued = models.BooleanField(default=False)
+    
+    notes = models.TextField(blank=True)
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"Death Report - {self.death_category} ({self.date_of_death})"
 
 
 # ==================== PROGRAMS & M&E ====================
 
-@admin.register(Program)
-class ProgramAdmin(admin.ModelAdmin):
-    list_display = ['name', 'code', 'county', 'program_manager', 'start_date', 'end_date', 'is_active', 'budget']
-    list_filter = ['is_active', 'county', 'start_date']
-    search_fields = ['name', 'code']
-    date_hierarchy = 'start_date'
-
-
-@admin.register(Indicator)
-class IndicatorAdmin(admin.ModelAdmin):
-    list_display = ['code', 'name', 'program', 'indicator_type', 'target_value', 'is_active']
-    list_filter = ['indicator_type', 'is_active', 'program']
-    search_fields = ['name', 'code']
-
-
-@admin.register(MonthlyReport)
-class MonthlyReportAdmin(admin.ModelAdmin):
-    list_display = ['facility_or_subcounty', 'year', 'month', 'outpatient_visits', 'deliveries', 'approved', 'submission_date']
-    list_filter = ['approved', 'year', 'month', 'facility', 'subcounty']
-    search_fields = ['facility__name', 'subcounty__name']
+class Program(models.Model):
+    """Health program"""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=200)
+    code = models.CharField(max_length=20, unique=True)
     
-    readonly_fields = ['submission_date', 'created_at']
+    description = models.TextField()
     
-    def facility_or_subcounty(self, obj):
-        return obj.facility or obj.subcounty
-    facility_or_subcounty.short_description = 'Reporting Unit'
+    start_date = models.DateField()
+    end_date = models.DateField(null=True, blank=True)
     
-    actions = ['approve_reports']
+    county = models.ForeignKey(County, on_delete=models.CASCADE, related_name='programs')
+    program_manager = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name='managed_programs')
     
-    def approve_reports(self, request, queryset):
-        updated = queryset.update(approved=True, approved_by=request.user, approval_date=timezone.now())
-        self.message_user(request, f'{updated} reports approved.')
-    approve_reports.short_description = 'Approve selected reports'
+    budget = models.DecimalField(max_digits=15, decimal_places=2, null=True, blank=True)
+    
+    is_active = models.BooleanField(default=True)
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"{self.name} ({self.code})"
 
 
-@admin.register(Campaign)
-class CampaignAdmin(admin.ModelAdmin):
-    list_display = ['name', 'campaign_type', 'start_date', 'end_date', 'people_reached', 'target_population', 'status']
-    list_filter = ['status', 'campaign_type', 'start_date']
-    search_fields = ['name', 'campaign_type']
-    date_hierarchy = 'start_date'
-    filter_horizontal = ['wards']
+class Indicator(models.Model):
+    """M&E Indicator"""
+    INDICATOR_TYPES = [
+        ('INPUT', 'Input'),
+        ('OUTPUT', 'Output'),
+        ('OUTCOME', 'Outcome'),
+        ('IMPACT', 'Impact'),
+    ]
+    
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    program = models.ForeignKey(Program, on_delete=models.CASCADE, related_name='indicators')
+    
+    name = models.CharField(max_length=200)
+    code = models.CharField(max_length=50, unique=True)
+    indicator_type = models.CharField(max_length=20, choices=INDICATOR_TYPES)
+    
+    definition = models.TextField()
+    
+    numerator_definition = models.TextField()
+    denominator_definition = models.TextField(blank=True)
+    
+    calculation_method = models.TextField()
+    
+    target_value = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    baseline_value = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    
+    reporting_frequency = models.CharField(max_length=20, help_text="Monthly/Quarterly/Annual")
+    
+    is_active = models.BooleanField(default=True)
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"{self.code} - {self.name}"
+
+
+class MonthlyReport(models.Model):
+    """Monthly aggregated health metrics report"""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    
+    facility = models.ForeignKey(Facility, on_delete=models.CASCADE, related_name='monthly_reports', null=True, blank=True)
+    subcounty = models.ForeignKey(SubCounty, on_delete=models.CASCADE, related_name='monthly_reports', null=True, blank=True)
+    
+    year = models.IntegerField()
+    month = models.IntegerField(validators=[MinValueValidator(1), MinValueValidator(12)])
+    
+    # Service statistics
+    outpatient_visits = models.IntegerField(default=0)
+    inpatient_admissions = models.IntegerField(default=0)
+    anc_visits = models.IntegerField(default=0)
+    deliveries = models.IntegerField(default=0)
+    immunizations_given = models.IntegerField(default=0)
+    
+    # Disease data
+    malaria_cases = models.IntegerField(default=0)
+    tb_cases = models.IntegerField(default=0)
+    hiv_tests = models.IntegerField(default=0)
+    
+    # Additional metrics as JSON
+    indicators = models.JSONField(default=dict, blank=True, help_text="Indicator code: value pairs")
+    
+    submitted_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
+    submission_date = models.DateTimeField(auto_now_add=True)
+    
+    approved = models.BooleanField(default=False)
+    approved_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='approved_reports')
+    approval_date = models.DateTimeField(null=True, blank=True)
+    
+    notes = models.TextField(blank=True)
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = [['facility', 'year', 'month']]
+        ordering = ['-year', '-month']
+
+    def __str__(self):
+        return f"Report {self.year}-{self.month:02d} - {self.facility or self.subcounty}"
+
+
+class Campaign(models.Model):
+    """Time-bound health campaign"""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    program = models.ForeignKey(Program, on_delete=models.CASCADE, related_name='campaigns')
+    
+    name = models.CharField(max_length=200)
+    campaign_type = models.CharField(max_length=50)
+    
+    start_date = models.DateField()
+    end_date = models.DateField()
+    
+    target_area = models.CharField(max_length=100, help_text="Geographic scope")
+    wards = models.ManyToManyField(Ward, related_name='campaigns', blank=True)
+    
+    target_population = models.IntegerField()
+    people_reached = models.IntegerField(default=0)
+    
+    objectives = models.TextField()
+    activities = models.JSONField(default=list, blank=True)
+    
+    budget = models.DecimalField(max_digits=12, decimal_places=2)
+    actual_expenditure = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    
+    campaign_manager = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
+    
+    status = models.CharField(max_length=20, default='PLANNED')
+    
+    final_report = models.TextField(blank=True)
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"{self.name} ({self.start_date} to {self.end_date})"
 
 
 # ==================== COMMODITIES & SUPPLY CHAIN ====================
 
-@admin.register(Commodity)
-class CommodityAdmin(admin.ModelAdmin):
-    list_display = ['name', 'commodity_code', 'commodity_type', 'unit_of_measure', 'is_essential', 'is_active']
-    list_filter = ['commodity_type', 'is_essential', 'is_active']
-    search_fields = ['name', 'commodity_code', 'generic_name']
-
-
-@admin.register(Supplier)
-class SupplierAdmin(admin.ModelAdmin):
-    list_display = ['name', 'supplier_code', 'contact_person', 'phone', 'rating', 'is_active']
-    list_filter = ['is_active', 'rating']
-    search_fields = ['name', 'supplier_code', 'contact_person']
-
-
-@admin.register(Stock)
-class StockAdmin(admin.ModelAdmin):
-    list_display = ['commodity', 'facility', 'quantity', 'batch_number', 'expiry_date', 'stock_status']
-    list_filter = ['facility', 'commodity__commodity_type', 'expiry_date']
-    search_fields = ['commodity__name', 'batch_number', 'facility__name']
+class Commodity(models.Model):
+    """Health commodity/medicine"""
+    COMMODITY_TYPES = [
+        ('MEDICINE', 'Medicine'),
+        ('VACCINE', 'Vaccine'),
+        ('SUPPLY', 'Medical Supply'),
+        ('EQUIPMENT', 'Equipment'),
+        ('REAGENT', 'Laboratory Reagent'),
+    ]
     
-    def stock_status(self, obj):
-        today = timezone.now().date()
-        if obj.expiry_date < today:
-            return format_html('<span style="color: red;">Expired</span>')
-        elif obj.expiry_date < today + timedelta(days=90):
-            return format_html('<span style="color: orange;">Expiring Soon</span>')
-        elif obj.quantity == 0:
-            return format_html('<span style="color: red;">Out of Stock</span>')
-        elif obj.quantity < obj.commodity.reorder_level:
-            return format_html('<span style="color: orange;">Low Stock</span>')
-        return format_html('<span style="color: green;">OK</span>')
-    stock_status.short_description = 'Status'
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    
+    name = models.CharField(max_length=200)
+    commodity_code = models.CharField(max_length=50, unique=True, db_index=True)
+    commodity_type = models.CharField(max_length=20, choices=COMMODITY_TYPES)
+    
+    generic_name = models.CharField(max_length=200, blank=True)
+    dosage_form = models.CharField(max_length=50, blank=True)
+    strength = models.CharField(max_length=50, blank=True)
+    
+    unit_of_measure = models.CharField(max_length=20, help_text="Tablets/Vials/Boxes")
+    
+    reorder_level = models.IntegerField(default=0)
+    ideal_stock_level = models.IntegerField(default=0)
+    
+    is_essential = models.BooleanField(default=False)
+    is_active = models.BooleanField(default=True)
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name_plural = "Commodities"
+        indexes = [
+            models.Index(fields=['commodity_code', 'commodity_type']),
+        ]
+
+    def __str__(self):
+        return f"{self.name} ({self.commodity_code})"
 
 
-@admin.register(StockTransaction)
-class StockTransactionAdmin(admin.ModelAdmin):
-    list_display = ['transaction_number', 'stock', 'transaction_type', 'quantity', 'transaction_date', 'performed_by']
-    list_filter = ['transaction_type', 'transaction_date']
-    search_fields = ['transaction_number', 'reference_number']
-    date_hierarchy = 'transaction_date'
-    readonly_fields = ['transaction_number', 'created_at']
+class Supplier(models.Model):
+    """Commodity supplier"""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    
+    name = models.CharField(max_length=200)
+    supplier_code = models.CharField(max_length=50, unique=True)
+    
+    contact_person = models.CharField(max_length=200)
+    phone = models.CharField(max_length=20)
+    email = models.EmailField()
+    physical_address = models.TextField()
+    
+    kra_pin = models.CharField(max_length=20, blank=True)
+    
+    is_active = models.BooleanField(default=True)
+    rating = models.DecimalField(max_digits=3, decimal_places=2, null=True, blank=True, help_text="0-5 rating")
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return self.name
 
 
-@admin.register(ProcurementRequest)
-class ProcurementRequestAdmin(admin.ModelAdmin):
-    list_display = ['request_number', 'facility', 'requested_by', 'request_date', 'status', 'priority']
-    list_filter = ['status', 'priority', 'request_date']
-    search_fields = ['request_number', 'facility__name']
-    date_hierarchy = 'request_date'
-    readonly_fields = ['request_number', 'created_at']
+class Stock(models.Model):
+    """Current stock at facility/warehouse"""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    
+    commodity = models.ForeignKey(Commodity, on_delete=models.CASCADE, related_name='stocks')
+    facility = models.ForeignKey(Facility, on_delete=models.CASCADE, related_name='stocks')
+    
+    quantity = models.IntegerField(default=0, validators=[MinValueValidator(0)])
+    batch_number = models.CharField(max_length=50)
+    expiry_date = models.DateField()
+    
+    unit_cost = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    
+    last_updated = models.DateTimeField(auto_now=True)
+    updated_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
+
+    class Meta:
+        unique_together = [['commodity', 'facility', 'batch_number']]
+        indexes = [
+            models.Index(fields=['facility', 'commodity']),
+        ]
+
+    def __str__(self):
+        return f"{self.commodity.name} at {self.facility.name} - {self.quantity}"
 
 
-@admin.register(PurchaseOrder)
-class PurchaseOrderAdmin(admin.ModelAdmin):
-    list_display = ['po_number', 'supplier', 'po_date', 'expected_delivery_date', 'total_amount', 'status']
-    list_filter = ['status', 'supplier', 'po_date']
-    search_fields = ['po_number', 'supplier__name']
-    date_hierarchy = 'po_date'
-    readonly_fields = ['po_number', 'created_at']
+class StockTransaction(models.Model):
+    """Stock movement transaction"""
+    TRANSACTION_TYPES = [
+        ('IN', 'Stock In (Receipt)'),
+        ('OUT', 'Stock Out (Issue)'),
+        ('ADJUSTMENT', 'Adjustment'),
+        ('TRANSFER', 'Transfer'),
+        ('EXPIRED', 'Expired/Damaged'),
+    ]
+    
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    transaction_number = models.CharField(max_length=50, unique=True, db_index=True)
+    
+    stock = models.ForeignKey(Stock, on_delete=models.CASCADE, related_name='transactions')
+    transaction_type = models.CharField(max_length=20, choices=TRANSACTION_TYPES)
+    
+    quantity = models.IntegerField()
+    transaction_date = models.DateTimeField(default=timezone.now)
+    
+    from_facility = models.ForeignKey(Facility, on_delete=models.SET_NULL, null=True, blank=True, related_name='stock_sent')
+    to_facility = models.ForeignKey(Facility, on_delete=models.SET_NULL, null=True, blank=True, related_name='stock_received')
+    
+    reference_number = models.CharField(max_length=50, blank=True, help_text="PO/GRN/Issue number")
+    
+    performed_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
+    approved_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='approved_transactions')
+    
+    notes = models.TextField(blank=True)
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-transaction_date']
+
+    def __str__(self):
+        return f"{self.transaction_type} - {self.transaction_number}"
+
+
+class ProcurementRequest(models.Model):
+    """Procurement/requisition request"""
+    STATUS_CHOICES = [
+        ('DRAFT', 'Draft'),
+        ('SUBMITTED', 'Submitted'),
+        ('APPROVED', 'Approved'),
+        ('REJECTED', 'Rejected'),
+        ('ORDERED', 'Ordered'),
+        ('DELIVERED', 'Delivered'),
+    ]
+    
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    request_number = models.CharField(max_length=50, unique=True)
+    
+    facility = models.ForeignKey(Facility, on_delete=models.CASCADE, related_name='procurement_requests')
+    requested_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
+    request_date = models.DateField(default=timezone.now)
+    
+    items = models.JSONField(default=list, help_text="List of {commodity_id, quantity, justification}")
+    
+    justification = models.TextField()
+    priority = models.CharField(max_length=20, default='NORMAL')
+    
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='DRAFT')
+    
+    reviewed_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='reviewed_requests')
+    review_date = models.DateTimeField(null=True, blank=True)
+    review_notes = models.TextField(blank=True)
+    
+    approved_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='approved_requests')
+    approval_date = models.DateTimeField(null=True, blank=True)
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"Procurement {self.request_number} - {self.facility.name}"
+
+
+class PurchaseOrder(models.Model):
+    """Purchase order to supplier"""
+    STATUS_CHOICES = [
+        ('DRAFT', 'Draft'),
+        ('SENT', 'Sent to Supplier'),
+        ('CONFIRMED', 'Confirmed by Supplier'),
+        ('PARTIAL_DELIVERY', 'Partially Delivered'),
+        ('DELIVERED', 'Fully Delivered'),
+        ('CANCELLED', 'Cancelled'),
+    ]
+    
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    po_number = models.CharField(max_length=50, unique=True)
+    
+    supplier = models.ForeignKey(Supplier, on_delete=models.PROTECT, related_name='purchase_orders')
+    procurement_request = models.ForeignKey(ProcurementRequest, on_delete=models.SET_NULL, null=True, blank=True)
+    
+    po_date = models.DateField(default=timezone.now)
+    expected_delivery_date = models.DateField()
+    actual_delivery_date = models.DateField(null=True, blank=True)
+    
+    items = models.JSONField(default=list, help_text="List of {commodity_id, quantity, unit_price}")
+    
+    total_amount = models.DecimalField(max_digits=15, decimal_places=2)
+    vat_amount = models.DecimalField(max_digits=15, decimal_places=2, default=0)
+    
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='DRAFT')
+    
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
+    approved_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='approved_pos')
+    
+    terms_and_conditions = models.TextField(blank=True)
+    notes = models.TextField(blank=True)
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"PO {self.po_number} - {self.supplier.name}"
 
 
 # ==================== LABORATORY ====================
 
-@admin.register(LabTestOrder)
-class LabTestOrderAdmin(admin.ModelAdmin):
-    list_display = ['order_number', 'patient', 'facility', 'order_date', 'status', 'ordered_by']
-    list_filter = ['status', 'priority', 'facility', 'order_date']
-    search_fields = ['order_number', 'patient__first_name', 'patient__last_name']
-    date_hierarchy = 'order_date'
-    inlines = [LabResultInline]
-    readonly_fields = ['order_number', 'created_at']
+class LabTestOrder(models.Model):
+    """Laboratory test order"""
+    STATUS_CHOICES = [
+        ('PENDING', 'Pending'),
+        ('SAMPLE_COLLECTED', 'Sample Collected'),
+        ('IN_PROGRESS', 'In Progress'),
+        ('COMPLETED', 'Completed'),
+        ('CANCELLED', 'Cancelled'),
+    ]
+    
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    order_number = models.CharField(max_length=50, unique=True)
+    
+    patient = models.ForeignKey(Person, on_delete=models.CASCADE, related_name='lab_orders')
+    facility = models.ForeignKey(Facility, on_delete=models.CASCADE, related_name='lab_orders')
+    
+    ordered_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name='lab_orders_made')
+    order_date = models.DateTimeField(default=timezone.now)
+    
+    tests_requested = ArrayField(models.CharField(max_length=100), help_text="List of test names/codes")
+    clinical_notes = models.TextField(blank=True)
+    
+    priority = models.CharField(max_length=20, default='ROUTINE')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='PENDING')
+    
+    sample_collected_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='samples_collected')
+    sample_collection_date = models.DateTimeField(null=True, blank=True)
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"Lab Order {self.order_number} - {self.patient.get_full_name()}"
 
 
-@admin.register(LabResult)
-class LabResultAdmin(admin.ModelAdmin):
-    list_display = ['lab_order', 'test_name', 'result_value', 'result_status', 'test_date', 'verified_by']
-    list_filter = ['result_status', 'test_date']
-    search_fields = ['lab_order__order_number', 'test_name']
-    date_hierarchy = 'test_date'
+class LabResult(models.Model):
+    """Laboratory test result"""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    lab_order = models.ForeignKey(LabTestOrder, on_delete=models.CASCADE, related_name='results')
+    
+    test_name = models.CharField(max_length=100)
+    test_code = models.CharField(max_length=50, blank=True)
+    
+    result_value = models.CharField(max_length=200)
+    unit = models.CharField(max_length=50, blank=True)
+    reference_range = models.CharField(max_length=100, blank=True)
+    
+    result_status = models.CharField(max_length=20, help_text="Normal/Abnormal/Critical")
+    
+    tested_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name='tests_performed')
+    test_date = models.DateTimeField()
+    
+    verified_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='results_verified')
+    verification_date = models.DateTimeField(null=True, blank=True)
+    
+    attachments = models.JSONField(default=list, blank=True, help_text="S3 URLs")
+    notes = models.TextField(blank=True)
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.test_name} - {self.lab_order.order_number}"
 
 
 # ==================== TRAINING & HR ====================
 
-@admin.register(StaffProfile)
-class StaffProfileAdmin(admin.ModelAdmin):
-    list_display = ['user', 'cadre', 'employee_number', 'primary_facility', 'license_expiry', 'employment_status']
-    list_filter = ['cadre', 'employment_status', 'primary_facility']
-    search_fields = ['user__first_name', 'user__last_name', 'employee_number', 'license_number']
-
-
-@admin.register(Training)
-class TrainingAdmin(admin.ModelAdmin):
-    list_display = ['course_name', 'start_date', 'end_date', 'venue', 'trainer', 'attendee_count']
-    list_filter = ['start_date', 'training_organization']
-    search_fields = ['course_name', 'course_code', 'trainer']
-    date_hierarchy = 'start_date'
+class StaffProfile(models.Model):
+    """Extended staff profile"""
+    CADRE_CHOICES = [
+        ('DOCTOR', 'Medical Doctor'),
+        ('CLINICAL_OFFICER', 'Clinical Officer'),
+        ('NURSE', 'Registered Nurse'),
+        ('ENROLLED_NURSE', 'Enrolled Nurse'),
+        ('LAB_TECH', 'Laboratory Technician'),
+        ('PHARMACIST', 'Pharmacist'),
+        ('PHARMACEUTICAL_TECH', 'Pharmaceutical Technician'),
+        ('NUTRITIONIST', 'Nutritionist'),
+        ('HEALTH_RECORDS', 'Health Records Officer'),
+        ('PUBLIC_HEALTH_OFFICER', 'Public Health Officer'),
+    ]
     
-    def attendee_count(self, obj):
-        return obj.attendees.count()
-    attendee_count.short_description = 'Attendees'
-
-
-@admin.register(TrainingAttendance)
-class TrainingAttendanceAdmin(admin.ModelAdmin):
-    list_display = ['staff', 'training', 'attended', 'attendance_percentage', 'certificate_issued']
-    list_filter = ['attended', 'certificate_issued', 'training']
-    search_fields = ['staff__user__first_name', 'staff__user__last_name', 'training__course_name']
-
-
-# ==================== SYSTEM ====================
-
-@admin.register(AuditLog)
-class AuditLogAdmin(admin.ModelAdmin):
-    list_display = ['model_name', 'object_id', 'action', 'changed_by', 'timestamp', 'ip_address']
-    list_filter = ['action', 'model_name', 'timestamp']
-    search_fields = ['model_name', 'object_id', 'changed_by__email']
-    date_hierarchy = 'timestamp'
-    readonly_fields = ['model_name', 'object_id', 'action', 'changed_by', 'timestamp', 'ip_address', 'user_agent', 'change_summary']
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='staff_profile')
     
-    def has_add_permission(self, request):
-        return False
+    cadre = models.CharField(max_length=30, choices=CADRE_CHOICES)
+    employee_number = models.CharField(max_length=50, unique=True)
     
-    def has_change_permission(self, request, obj=None):
-        return False
+    qualification = models.CharField(max_length=200)
+    institution = models.CharField(max_length=200, blank=True)
+    graduation_year = models.IntegerField(null=True, blank=True)
     
-    def has_delete_permission(self, request, obj=None):
-        return request.user.is_superuser
-
-
-@admin.register(Notification)
-class NotificationAdmin(admin.ModelAdmin):
-    list_display = ['title', 'recipient', 'channel', 'notification_type', 'status', 'priority', 'created_at']
-    list_filter = ['status', 'channel', 'notification_type', 'priority', 'created_at']
-    search_fields = ['title', 'message', 'recipient__email']
-    date_hierarchy = 'created_at'
-    readonly_fields = ['sent_at', 'read_at', 'created_at']
+    license_number = models.CharField(max_length=50, blank=True)
+    licensing_body = models.CharField(max_length=100, blank=True)
+    license_expiry = models.DateField(null=True, blank=True)
     
-    actions = ['mark_as_sent', 'mark_as_read']
+    specialization = models.CharField(max_length=200, blank=True)
+    years_of_experience = models.IntegerField(default=0)
     
-    def mark_as_sent(self, request, queryset):
-        updated = queryset.update(status='SENT', sent_at=timezone.now())
-        self.message_user(request, f'{updated} notifications marked as sent.')
-    mark_as_sent.short_description = 'Mark selected as sent'
+    primary_facility = models.ForeignKey(Facility, on_delete=models.SET_NULL, null=True, related_name='primary_staff')
     
-    def mark_as_read(self, request, queryset):
-        updated = queryset.update(status='READ', read_at=timezone.now())
-        self.message_user(request, f'{updated} notifications marked as read.')
-    mark_as_read.short_description = 'Mark selected as read'
-
-
-@admin.register(FHIRMapping)
-class FHIRMappingAdmin(admin.ModelAdmin):
-    list_display = ['local_model', 'local_id', 'fhir_resource_type', 'fhir_id', 'external_system', 'sync_status', 'last_synced_at']
-    list_filter = ['sync_status', 'fhir_resource_type', 'external_system']
-    search_fields = ['local_model', 'local_id', 'fhir_id']
-    readonly_fields = ['created_at', 'updated_at']
-
-
-@admin.register(DataExportJob)
-class DataExportJobAdmin(admin.ModelAdmin):
-    list_display = ['export_type', 'model_name', 'requested_by', 'request_date', 'status', 'records_exported', 'file_size_mb']
-    list_filter = ['status', 'export_type', 'request_date']
-    search_fields = ['model_name', 'requested_by__email']
-    date_hierarchy = 'request_date'
-    readonly_fields = ['request_date', 'started_at', 'completed_at', 'file_url', 'error_message']
+    employment_date = models.DateField()
+    employment_status = models.CharField(max_length=20, default='ACTIVE')
     
-    def file_size_mb(self, obj):
-        if obj.file_size:
-            return f"{obj.file_size / (1024*1024):.2f} MB"
-        return '-'
-    file_size_mb.short_description = 'File Size'
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"{self.user.get_full_name()} - {self.cadre}"
 
 
-@admin.register(Appointment)
-class AppointmentAdmin(admin.ModelAdmin):
-    list_display = ['appointment_number', 'person', 'facility', 'appointment_date', 'appointment_time', 'appointment_type', 'status']
-    list_filter = ['status', 'appointment_type', 'facility', 'appointment_date']
-    search_fields = ['appointment_number', 'person__first_name', 'person__last_name', 'person__phone']
-    date_hierarchy = 'appointment_date'
-    readonly_fields = ['appointment_number', 'created_at', 'updated_at']
+class Training(models.Model):
+    """Training session record"""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     
-    fieldsets = (
-        ('Appointment Details', {
-            'fields': ('appointment_number', 'person', 'facility')
-        }),
-        ('Schedule', {
-            'fields': ('appointment_date', 'appointment_time', 'appointment_type')
-        }),
-        ('Assignment', {
-            'fields': ('scheduled_by', 'assigned_to')
-        }),
-        ('Status', {
-            'fields': ('status', 'reason', 'notes')
-        }),
-        ('Tracking', {
-            'fields': ('reminder_sent', 'reminder_sent_at', 'checked_in_at', 'completed_at'),
-            'classes': ('collapse',)
-        }),
-    )
+    course_name = models.CharField(max_length=200)
+    course_code = models.CharField(max_length=50, blank=True)
     
-    actions = ['send_reminders', 'mark_completed']
+    start_date = models.DateField()
+    end_date = models.DateField()
+    venue = models.CharField(max_length=200)
     
-    def send_reminders(self, request, queryset):
-        count = 0
-        for appointment in queryset.filter(status='SCHEDULED'):
-            # Logic to send reminder would go here
-            appointment.reminder_sent = True
-            appointment.reminder_sent_at = timezone.now()
-            appointment.save()
-            count += 1
-        self.message_user(request, f'{count} reminders sent.')
-    send_reminders.short_description = 'Send appointment reminders'
+    trainer = models.CharField(max_length=200)
+    training_organization = models.CharField(max_length=200, blank=True)
     
-    def mark_completed(self, request, queryset):
-        updated = queryset.update(status='COMPLETED', completed_at=timezone.now())
-        self.message_user(request, f'{updated} appointments marked as completed.')
-    mark_completed.short_description = 'Mark selected as completed'
-
-
-@admin.register(PNCVisit)
-class PNCVisitAdmin(admin.ModelAdmin):
-    list_display = ['pregnancy_woman', 'visit_number', 'visit_date', 'days_postpartum', 'mother_condition', 'facility']
-    list_filter = ['facility', 'visit_date']
-    search_fields = ['pregnancy__woman__first_name', 'pregnancy__woman__last_name']
-    date_hierarchy = 'visit_date'
+    attendees = models.ManyToManyField(StaffProfile, through='TrainingAttendance', related_name='trainings')
     
-    def pregnancy_woman(self, obj):
-        return obj.pregnancy.woman
-    pregnancy_woman.short_description = 'Woman'
-
-
-@admin.register(Location)
-class LocationAdmin(admin.ModelAdmin):
-    list_display = ['name', 'location_type', 'ward', 'population', 'coordinates']
-    list_filter = ['location_type', 'ward__subcounty__county', 'ward']
-    search_fields = ['name', 'description']
+    objectives = models.TextField()
+    content_summary = models.TextField(blank=True)
     
-    def coordinates(self, obj):
-        if obj.latitude and obj.longitude:
-            return f"{obj.latitude}, {obj.longitude}"
-        return '-'
-    coordinates.short_description = 'Coordinates'
-
-
-# ==================== CUSTOM ADMIN DASHBOARD STATS ====================
-
-class DashboardStats:
-    """
-    Custom dashboard statistics
-    This would be displayed on the admin index page
-    """
+    budget = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     
-    @staticmethod
-    def get_stats():
-        from datetime import date, timedelta
-        today = date.today()
-        week_ago = today - timedelta(days=7)
-        month_ago = today - timedelta(days=30)
-        
-        stats = {
-            'total_facilities': Facility.objects.filter(is_operational=True).count(),
-            'total_chvs': CommunityHealthVolunteer.objects.filter(is_active=True).count(),
-            'total_households': Household.objects.filter(is_active=True).count(),
-            'total_population': Person.objects.filter(is_alive=True).count(),
-            'active_pregnancies': PregnancyRecord.objects.filter(is_active=True).count(),
-            'pending_referrals': Referral.objects.filter(status='PENDING').count(),
-            'this_week_visits': HouseholdVisit.objects.filter(visit_date__gte=week_ago).count(),
-            'this_month_screenings': Screening.objects.filter(screening_date__gte=month_ago).count(),
-            'low_stock_items': Stock.objects.filter(
-                quantity__lt=models.F('commodity__reorder_level')
-            ).count(),
-            'pending_lab_orders': LabTestOrder.objects.filter(status='PENDING').count(),
-        }
-        
-        return stats
-
-
-# ==================== ADMIN ACTIONS ====================
-
-def export_to_csv(modeladmin, request, queryset):
-    """
-    Generic CSV export action
-    """
-    import csv
-    from django.http import HttpResponse
+    organized_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
     
-    meta = modeladmin.model._meta
-    field_names = [field.name for field in meta.fields]
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"{self.course_name} ({self.start_date})"
+
+
+class TrainingAttendance(models.Model):
+    """Training attendance record"""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     
-    response = HttpResponse(content_type='text/csv')
-    response['Content-Disposition'] = f'attachment; filename={meta}.csv'
-    writer = csv.writer(response)
+    training = models.ForeignKey(Training, on_delete=models.CASCADE)
+    staff = models.ForeignKey(StaffProfile, on_delete=models.CASCADE)
     
-    writer.writerow(field_names)
-    for obj in queryset:
-        writer.writerow([getattr(obj, field) for field in field_names])
+    attended = models.BooleanField(default=True)
+    attendance_percentage = models.DecimalField(max_digits=5, decimal_places=2, default=100)
     
-    return response
-
-export_to_csv.short_description = "Export selected to CSV"
-
-
-# Add export action to all admins
-def register_export_action():
-    """Register export action to all model admins"""
-    for model, model_admin in admin.site._registry.items():
-        if 'export_to_csv' not in [action.__name__ for action in model_admin.actions]:
-            model_admin.actions = list(model_admin.actions) + [export_to_csv]
-
-
-# ==================== ADMIN SITE CUSTOMIZATION ====================
-
-# Customize admin site
-admin.site.site_header = "Wajir County Health Management System"
-admin.site.site_title = "Wajir Health Admin"
-admin.site.index_title = "System Administration Dashboard"
-
-
-# ==================== CUSTOM FILTERS ====================
-
-class ExpiryDateFilter(admin.SimpleListFilter):
-    """Filter for expiring stock"""
-    title = 'Expiry Status'
-    parameter_name = 'expiry'
+    pre_test_score = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    post_test_score = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
     
-    def lookups(self, request, model_admin):
-        return (
-            ('expired', 'Expired'),
-            ('expiring_soon', 'Expiring within 90 days'),
-            ('valid', 'Valid'),
-        )
+    certificate_issued = models.BooleanField(default=False)
+    certificate_number = models.CharField(max_length=50, blank=True)
     
-    def queryset(self, request, queryset):
-        from datetime import date, timedelta
-        today = date.today()
-        
-        if self.value() == 'expired':
-            return queryset.filter(expiry_date__lt=today)
-        if self.value() == 'expiring_soon':
-            return queryset.filter(
-                expiry_date__gte=today,
-                expiry_date__lt=today + timedelta(days=90)
-            )
-        if self.value() == 'valid':
-            return queryset.filter(expiry_date__gte=today + timedelta(days=90))
-
-
-class StockLevelFilter(admin.SimpleListFilter):
-    """Filter for stock levels"""
-    title = 'Stock Level'
-    parameter_name = 'stock_level'
+    feedback = models.TextField(blank=True)
     
-    def lookups(self, request, model_admin):
-        return (
-            ('out', 'Out of Stock'),
-            ('low', 'Low Stock'),
-            ('adequate', 'Adequate'),
-        )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = [['training', 'staff']]
+
+    def __str__(self):
+        return f"{self.staff.user.get_full_name()} - {self.training.course_name}"
+
+
+
+
+
+# ==================== MATERNAL & CHILD HEALTH ====================
+
+class PregnancyRecord(models.Model):
+    """Pregnancy tracking record"""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    woman = models.ForeignKey(Person, on_delete=models.CASCADE, related_name='pregnancies')
     
-    def queryset(self, request, queryset):
-        if self.value() == 'out':
-            return queryset.filter(quantity=0)
-        if self.value() == 'low':
-            return queryset.filter(
-                quantity__gt=0,
-                quantity__lt=models.F('commodity__reorder_level')
-            )
-        if self.value() == 'adequate':
-            return queryset.filter(quantity__gte=models.F('commodity__reorder_level'))
-
-
-# Apply custom filters
-Stock.list_filter = list(Stock._meta.get_field('facility').related_model._meta.get_fields()) + [ExpiryDateFilter, StockLevelFilter]
-
-
-# ==================== INLINE FORMSETS CONFIGURATION ====================
-
-# Set maximum number of inline forms
-admin.site.empty_value_display = '---'
-
-# Configure inline formset options
-for inline_class in [
-    SubCountyInline, WardInline, ANCVisitInline, PNCVisitInline,
-    ReferralFollowUpInline, StockInline, LabResultInline
-]:
-    inline_class.can_delete = True
-    inline_class.show_change_link = True
-
-
-# ==================== HELP TEXT ====================
-
-# You can add custom help text or documentation links
-# This would appear in the admin interface
-
-ADMIN_HELP_TEXT = {
-    'User': 'Manage system users and their roles. Users can have multiple roles for different access levels.',
-    'Facility': 'Health facilities including dispensaries, health centres, and hospitals.',
-    'Person': 'Individual patient/citizen records. Ensure National ID and NHIF numbers are accurate.',
-    'Referral': 'Track patient referrals between facilities. Follow up on pending referrals regularly.',
-    'Stock': 'Monitor commodity stock levels. Check expiry dates regularly to avoid wastage.',
-}
-
-
-# ==================== ADMIN SITE REGISTRATION VERIFICATION ====================
-
-# Verify all models are registered
-def check_registered_models():
-    """
-    Check which models are registered in admin
-    Run this during development to ensure all models are registered
-    """
-    from django.apps import apps
+    lmp_date = models.DateField(help_text="Last Menstrual Period")
+    edd = models.DateField(help_text="Estimated Delivery Date")
     
-    all_models = apps.get_models()
-    registered_models = admin.site._registry.keys()
+    gravida = models.IntegerField(help_text="Total pregnancies")
+    parity = models.IntegerField(help_text="Number of births")
     
-    unregistered = [model for model in all_models if model not in registered_models]
+    risk_factors = ArrayField(models.CharField(max_length=100), blank=True, default=list)
+    is_high_risk = models.BooleanField(default=False)
     
-    if unregistered:
-        print("Unregistered models:")
-        for model in unregistered:
-            print(f"  - {model.__name__}")
-    else:
-        print("All models are registered in admin!")
+    anc_visits_completed = models.IntegerField(default=0)
+    delivery_date = models.DateField(null=True, blank=True)
+    delivery_outcome = models.CharField(max_length=50, blank=True)
+    delivery_facility = models.ForeignKey(Facility, on_delete=models.SET_NULL, null=True, blank=True)
     
-    return unregistered
+    is_active = models.BooleanField(default=True)
+    notes = models.TextField(blank=True)
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"Pregnancy - {self.woman.get_full_name()} (EDD: {self.edd})"
 
 
-# ==================== NOTES FOR IMPLEMENTATION ====================
+class ANCVisit(models.Model):
+    """Antenatal Care Visit"""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    pregnancy = models.ForeignKey(PregnancyRecord, on_delete=models.CASCADE, related_name='anc_visits')
+    
+    visit_number = models.IntegerField()
+    visit_date = models.DateField()
+    gestation_weeks = models.IntegerField()
+    
+    facility = models.ForeignKey(Facility, on_delete=models.SET_NULL, null=True)
+    attended_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
+    
+    weight = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    blood_pressure = models.CharField(max_length=20, blank=True)
+    hemoglobin = models.DecimalField(max_digits=4, decimal_places=1, null=True, blank=True)
+    
+    tests_done = ArrayField(models.CharField(max_length=50), blank=True, default=list)
+    supplements_given = ArrayField(models.CharField(max_length=50), blank=True, default=list)
+    
+    next_visit_date = models.DateField(null=True, blank=True)
+    notes = models.TextField(blank=True)
+    
+    created_at = models.DateTimeField(auto_now_add=True)
 
-"""
-IMPLEMENTATION CHECKLIST:
+    class Meta:
+        ordering = ['pregnancy', 'visit_number']
+        unique_together = [['pregnancy', 'visit_number']]
 
-1. Import this file in your Django app's admin.py
-2. Ensure all models are imported correctly from your models.py
-3. Run migrations: python manage.py makemigrations && python manage.py migrate
-4. Create superuser: python manage.py createsuperuser
-5. Collect static files: python manage.py collectstatic
+    def __str__(self):
+        return f"ANC Visit {self.visit_number} - {self.pregnancy.woman.get_full_name()}"
 
-CUSTOMIZATION OPTIONS:
 
-1. Custom Actions:
-   - Add bulk actions for common operations
-   - Export data in different formats
-   - Send notifications to multiple users
+class ImmunizationRecord(models.Model):
+    """Child immunization record"""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    child = models.ForeignKey(Person, on_delete=models.CASCADE, related_name='immunizations')
+    
+    vaccine_name = models.CharField(max_length=100)
+    vaccine_code = models.CharField(max_length=20)
+    dose_number = models.IntegerField()
+    
+    administration_date = models.DateField()
+    administered_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
+    facility = models.ForeignKey(Facility, on_delete=models.SET_NULL, null=True)
+    
+    batch_number = models.CharField(max_length=50, blank=True)
+    expiry_date = models.DateField(null=True, blank=True)
+    
+    site = models.CharField(max_length=50, blank=True, help_text="Administration site")
+    adverse_reaction = models.TextField(blank=True)
+    
+    next_dose_date = models.DateField(null=True, blank=True)
+    
+    created_at = models.DateTimeField(auto_now_add=True)
 
-2. Custom Filters:
-   - Add date range filters
-   - Geographic filters (County -> SubCounty -> Ward)
-   - Status-based filters
+    class Meta:
+        ordering = ['child', 'administration_date']
 
-3. Dashboard Enhancements:
-   - Install django-admin-tools for better dashboard
-   - Add charts using django-admin-charts
-   - Implement real-time statistics
+    def __str__(self):
+        return f"{self.vaccine_name} - {self.child.get_full_name()}"
 
-4. Permissions:
-   - Implement row-level permissions based on user's county/facility
-   - Restrict access to sensitive data (PII)
-   - Create custom permission classes
 
-5. UI Improvements:
-   - Install django-grappelli or django-suit for better UI
-   - Add custom CSS/JS for specific functionality
-   - Implement autocomplete fields for foreign keys
+# ==================== PUBLIC HEALTH ACTIVITIES ====================
 
-6. Performance:
-   - Add select_related and prefetch_related in get_queryset
-   - Implement caching for dashboard statistics
-   - Use database indexes effectively
+class HouseholdVisit(models.Model):
+    """CHV household visit record"""
+    VISIT_TYPES = [
+        ('ROUTINE', 'Routine Visit'),
+        ('FOLLOW_UP', 'Follow-up'),
+        ('REFERRAL_CHECK', 'Referral Follow-up'),
+        ('EMERGENCY', 'Emergency'),
+    ]
+    
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    household = models.ForeignKey(Household, on_delete=models.CASCADE, related_name='visits')
+    chv = models.ForeignKey(CommunityHealthVolunteer, on_delete=models.SET_NULL, null=True)
+    
+    visit_date = models.DateField()
+    visit_type = models.CharField(max_length=20, choices=VISIT_TYPES)
+    
+    members_present = models.IntegerField(default=0)
+    services_provided = ArrayField(models.CharField(max_length=100), blank=True, default=list)
+    
+    findings = models.TextField(blank=True)
+    action_taken = models.TextField(blank=True)
+    referrals_made = models.IntegerField(default=0)
+    
+    next_visit_date = models.DateField(null=True, blank=True)
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
-SECURITY NOTES:
+    class Meta:
+        ordering = ['-visit_date']
 
-1. Audit Logs:
-   - All sensitive operations are logged in AuditLog
-   - Audit logs cannot be edited or deleted (except by superuser)
+    def __str__(self):
+        return f"Visit to {self.household} on {self.visit_date}"
 
-2. Permissions:
-   - Implement proper permission checks in views
-   - Use Django's permission system
-   - Add custom permissions for specific actions
 
-3. Data Protection:
-   - Encrypt sensitive fields (National ID, NHIF)
-   - Use HTTPS in production
-   - Implement proper backup strategies
+class OutreachEvent(models.Model):
+    """Mass outreach/screening event"""
+    EVENT_TYPES = [
+        ('IMMUNIZATION', 'Mass Immunization'),
+        ('SCREENING', 'Health Screening'),
+        ('EDUCATION', 'Health Education'),
+        ('DEWORMING', 'Deworming Campaign'),
+        ('NUTRITION', 'Nutrition Program'),
+    ]
+    
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=200)
+    event_type = models.CharField(max_length=30, choices=EVENT_TYPES)
+    
+    start_date = models.DateField()
+    end_date = models.DateField()
+    
+    location = models.CharField(max_length=200)
+    ward = models.ForeignKey(Ward, on_delete=models.CASCADE, related_name='outreach_events')
+    
+    target_population = models.IntegerField()
+    people_reached = models.IntegerField(default=0)
+    
+    organizing_facility = models.ForeignKey(Facility, on_delete=models.SET_NULL, null=True)
+    partners = models.TextField(blank=True, help_text="Partner organizations")
+    
+    services_offered = ArrayField(models.CharField(max_length=100), blank=True, default=list)
+    commodities_used = models.JSONField(default=dict, blank=True)
+    
+    budget = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    actual_cost = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    
+    report = models.TextField(blank=True)
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
-TESTING:
+    def __str__(self):
+        return f"{self.name} ({self.start_date})"
 
-Run the following tests:
-1. python manage.py test
-2. Check admin interface loads properly
-3. Test CRUD operations for each model
-4. Verify filters and search work correctly
-5. Test custom actions
-6. Check permissions work as expected
-"""
+
+class Screening(models.Model):
+    """Individual screening record"""
+    SCREENING_TYPES = [
+        ('TB', 'Tuberculosis'),
+        ('HIV', 'HIV'),
+        ('DIABETES', 'Diabetes'),
+        ('HYPERTENSION', 'Hypertension'),
+        ('MALNUTRITION', 'Malnutrition'),
+        ('CERVICAL_CANCER', 'Cervical Cancer'),
+    ]
+    
+    RESULT_CHOICES = [
+        ('NEGATIVE', 'Negative'),
+        ('POSITIVE', 'Positive'),
+        ('INCONCLUSIVE', 'Inconclusive'),
+        ('REFERRED', 'Referred for Further Testing'),
+    ]
+    
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    person = models.ForeignKey(Person, on_delete=models.CASCADE, related_name='screenings')
+    
+    screening_type = models.CharField(max_length=30, choices=SCREENING_TYPES)
+    screening_date = models.DateField()
+    
+    screened_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
+    facility = models.ForeignKey(Facility, on_delete=models.SET_NULL, null=True, blank=True)
+    outreach_event = models.ForeignKey(OutreachEvent, on_delete=models.SET_NULL, null=True, blank=True)
+    
+    result = models.CharField(max_length=20, choices=RESULT_CHOICES)
+    result_details = models.JSONField(default=dict, blank=True)
+    
+    follow_up_required = models.BooleanField(default=False)
+    follow_up_date = models.DateField(null=True, blank=True)
+    
+    notes = models.TextField(blank=True)
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.screening_type} - {self.person.get_full_name()}"
+
+
+# ==================== REFERRALS ====================
+
+class Referral(models.Model):
+    """Patient referral tracking"""
+    URGENCY_LEVELS = [
+        ('ROUTINE', 'Routine'),
+        ('URGENT', 'Urgent'),
+        ('EMERGENCY', 'Emergency'),
+    ]
+    
+    STATUS_CHOICES = [
+        ('PENDING', 'Pending'),
+        ('ACCEPTED', 'Accepted'),
+        ('IN_TRANSIT', 'In Transit'),
+        ('ARRIVED', 'Arrived'),
+        ('COMPLETED', 'Completed'),
+        ('CANCELLED', 'Cancelled'),
+    ]
+    
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    referral_number = models.CharField(max_length=50, unique=True, db_index=True)
+    
+    person = models.ForeignKey(Person, on_delete=models.CASCADE, related_name='referrals')
+    
+    from_facility = models.ForeignKey(Facility, on_delete=models.SET_NULL, null=True, related_name='referrals_sent')
+    to_facility = models.ForeignKey(Facility, on_delete=models.SET_NULL, null=True, related_name='referrals_received')
+    
+    referred_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name='referrals_made')
+    
+    referral_date = models.DateTimeField(default=timezone.now)
+    urgency = models.CharField(max_length=20, choices=URGENCY_LEVELS)
+    
+    reason = models.TextField()
+    diagnosis = models.TextField(blank=True)
+    treatment_given = models.TextField(blank=True)
+    
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='PENDING')
+    
+    accepted_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='referrals_accepted')
+    accepted_date = models.DateTimeField(null=True, blank=True)
+    
+    arrival_date = models.DateTimeField(null=True, blank=True)
+    completion_date = models.DateTimeField(null=True, blank=True)
+    
+    outcome = models.TextField(blank=True)
+    feedback_to_referring_facility = models.TextField(blank=True)
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-referral_date']
+        indexes = [
+            models.Index(fields=['referral_number', 'status']),
+        ]
+
+    def __str__(self):
+        return f"Referral {self.referral_number} - {self.person.get_full_name()}"
+
+
+class ReferralFollowUp(models.Model):
+    """Follow-up on referral"""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    referral = models.ForeignKey(Referral, on_delete=models.CASCADE, related_name='follow_ups')
+    
+    follow_up_date = models.DateTimeField(default=timezone.now)
+    followed_up_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
+    
+    status_update = models.CharField(max_length=200)
+    notes = models.TextField(blank=True)
+    action_taken = models.TextField(blank=True)
+    
+    created_at = models
